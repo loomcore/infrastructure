@@ -43,7 +43,7 @@ Copy and paste this block into your PowerShell window to set up the variables we
 ```powershell
 # === CONFIGURATION ===
 $ORG_ID = "123456789012"                # Run 'gcloud organizations list' to find this (format: numeric string)
-$FOLDER_ID = "987654321098"            # The folder ID where projects will be created (format: numeric string)
+$FOLDER_ID = "987654321098"             # The folder ID where projects will be created (format: numeric string)
                                         # Run 'gcloud resource-manager folders list --organization=$ORG_ID' to find this
 $BILLING_ACCOUNT_ID = "01ABCD-123456-789ABC" # Run 'gcloud beta billing accounts list' to find this (format: alphanumeric with dashes)
 $DOMAIN = "mydomain.com"                # Your organization's domain name
