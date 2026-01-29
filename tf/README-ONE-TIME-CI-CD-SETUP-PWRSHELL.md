@@ -4,8 +4,11 @@ This guide outlines the **one-time manual steps** required to bootstrap your Goo
 
 **Prerequisites:**
 1.  You must have the **Google Cloud SDK** (`gcloud`) installed and initialized.
-2.  You must be a **Billing Account Administrator** and **Organization Administrator**.
-3.  Run these commands in **PowerShell**.
+2.  Run these commands in **PowerShell**.
+3.  Your account must have the following roles (at the org, folder, or project level as needed):
+    - **Billing Account Administrator** — to link billing to new projects.
+    - **Organization Administrator** (or equivalent) — to create projects and manage org-level settings.
+    - **Organization Policy Administrator** (`roles/orgpolicy.policyAdmin`) on the projects (or a parent folder/org) — to set the `iam.allowedPolicyMemberDomains` policy so Cloud Run can allow public (`allUsers`) access.
 
 ### Installing Google Cloud SDK
 
@@ -42,12 +45,13 @@ Copy and paste this block into your PowerShell window to set up the variables we
 
 ```powershell
 # === CONFIGURATION ===
-$ORG_ID = "123456789012"                # Run 'gcloud organizations list' to find this (format: numeric string)
-$FOLDER_ID = "987654321098"             # The folder ID where projects will be created (format: numeric string)
-                                        # Run 'gcloud resource-manager folders list --organization=$ORG_ID' to find this
+$ORG_ID = "123456789012"                    # Run 'gcloud organizations list' to find this (format: numeric string)
+$FOLDER_ID = "987654321098"                 # The folder ID where projects will be created (format: numeric string)
+                                            # Run 'gcloud resource-manager folders list --organization=$ORG_ID' to find this
 $BILLING_ACCOUNT_ID = "01ABCD-123456-789ABC" # Run 'gcloud beta billing accounts list' to find this (format: alphanumeric with dashes)
-$DOMAIN = "mydomain.com"                # Your organization's domain name
-$GITHUB_REPO = "my-org/infrastructure"          # Format: ORG/REPO (your GitHub organization and infra repo name)
+$DOMAIN = "mydomain.com"                    # Your organization's domain name
+$GITHUB_REPO = "my-org/infrastructure"      # Format: ORG/REPO (your GitHub organization and infra repo name)
+$GITHUB_ORG = $GITHUB_REPO.Split('/')[0]    # Derived from GITHUB_REPO (e.g. "my-org"); used in WIF attribute conditions
 $PROJECT_NAME = "project-name"
 
 # Project IDs (must be globally unique, lowercase, alphanumeric and hyphens only)
@@ -56,7 +60,7 @@ $DEV_PROJECT_ID = "project-name-dev"
 $PROD_PROJECT_ID = "project-name-prod"
 
 # Resources
-$TF_STATE_BUCKET = "org-name-terraform-state"  # Globally unique bucket name for Terraform state (lowercase, alphanumeric and hyphens)
+$TF_STATE_BUCKET = "org-name-terraform-state"   # Globally unique bucket name for Terraform state (lowercase, alphanumeric and hyphens)
 $WIF_POOL_NAME = "github-pool"                  # Workload Identity Pool name
 $WIF_PROVIDER_NAME = "github-provider"          # Workload Identity Provider name
 $SA_DEV = "github-actions-dev"                  # Service account name for dev environment
@@ -68,11 +72,16 @@ $REGION = "us-central1"                         # Or your preferred region (e.g.
 
 ## Phase 1: Create Projects & Link Billing
 
+Project creation is asynchronous in GCP. A short delay before linking billing (or running Phase 2) avoids "project not found" or similar errors.
+
 ```powershell
 # Create Projects
 gcloud projects create $SHARED_PROJECT_ID --name="Project Name Shared" --folder=$FOLDER_ID
 gcloud projects create $DEV_PROJECT_ID --name="Project Name Dev" --folder=$FOLDER_ID
 gcloud projects create $PROD_PROJECT_ID --name="Project Name Prod" --folder=$FOLDER_ID
+
+# Wait for project creation to propagate before using projects
+Start-Sleep -Seconds 10
 
 # Link Billing
 gcloud beta billing projects link $SHARED_PROJECT_ID --billing-account=$BILLING_ACCOUNT_ID
@@ -100,10 +109,15 @@ gcloud storage buckets update gs://$TF_STATE_BUCKET --versioning
 
 ## Phase 3: Create Service Accounts (in Shared Project)
 
+Service accounts must propagate in GCP before they can be used in IAM bindings. A short delay after creation avoids "Service account does not exist" errors.
+
 ```powershell
 # Create SAs
 gcloud iam service-accounts create $SA_DEV --display-name="GitHub Actions Dev"
 gcloud iam service-accounts create $SA_PROD --display-name="GitHub Actions Prod"
+
+# Wait for IAM propagation (avoids "Service account does not exist" when binding immediately)
+Start-Sleep -Seconds 10
 
 # Grant Bucket Access (Storage Object Admin)
 gcloud storage buckets add-iam-policy-binding gs://$TF_STATE_BUCKET `
@@ -119,14 +133,13 @@ gcloud storage buckets add-iam-policy-binding gs://$TF_STATE_BUCKET `
 
 ## Phase 4: Configure Workload Identity Federation (WIF)
 
+The workload identity pool and provider may need a moment to propagate before IAM bindings that reference them succeed.
+
 ```powershell
 # Create Workload Identity Pool
 gcloud iam workload-identity-pools create $WIF_POOL_NAME `
     --location="global" `
     --display-name="GitHub Actions Pool"
-
-# Extract GitHub organization name from repo
-$GITHUB_ORG = $GITHUB_REPO.Split('/')[0]
 
 # Create OIDC Provider
 gcloud iam workload-identity-pools providers create-oidc $WIF_PROVIDER_NAME `
@@ -139,6 +152,9 @@ gcloud iam workload-identity-pools providers create-oidc $WIF_PROVIDER_NAME `
 
 # Get the Pool ID for the next step
 $POOL_ID = gcloud iam workload-identity-pools describe $WIF_POOL_NAME --location="global" --format="value(name)"
+
+# Wait for WIF pool/provider to propagate before binding to service accounts
+Start-Sleep -Seconds 10
 
 # Allow any GitHub repo in the organization to impersonate Dev SA
 gcloud iam service-accounts add-iam-policy-binding "$SA_DEV@$SHARED_PROJECT_ID.iam.gserviceaccount.com" `
@@ -204,6 +220,9 @@ We grant the Service Accounts (which live in Shared) permissions on the Target p
 gcloud config set project $DEV_PROJECT_ID
 gcloud services enable run.googleapis.com sqladmin.googleapis.com compute.googleapis.com servicenetworking.googleapis.com orgpolicy.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com
 
+# Wait for API enablement to propagate before granting roles
+Start-Sleep -Seconds 10
+
 # Grant dev permissions
 $DEV_ROLES = @(
     "roles/run.admin",
@@ -241,6 +260,9 @@ gcloud org-policies set-policy allow-public-cloudrun-dev.yaml
 # Enable APIs in Prod Project
 gcloud config set project $PROD_PROJECT_ID
 gcloud services enable run.googleapis.com sqladmin.googleapis.com compute.googleapis.com servicenetworking.googleapis.com orgpolicy.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com
+
+# Wait for API enablement to propagate before granting roles
+Start-Sleep -Seconds 10
 
 # Grant prod permissions
 $PROD_ROLES = @(
@@ -288,7 +310,7 @@ Write-Host "=== GITHUB REPOSITORY VARIABLES ==="
 Write-Host "GCP_SHARED_PROJECT_ID: $SHARED_PROJECT_ID"
 Write-Host "GCP_TF_STATE_BUCKET: $TF_STATE_BUCKET"
 Write-Host "GCP_REGION: $REGION"
-Write-Host "APP_NAME: $PROJECT_NAME"
+Write-Host "APP_NAME: (choose and set your app name - e.g. my-app, it will be used in workflows for my-app-api and my-app-client, etc)"
 Write-Host ""
 Write-Host "GCP_CLIENT_BUILD_ARTIFACT_BUCKET: (You must choose and set this manually)"
 Write-Host "  - Choose a globally unique bucket name (e.g., 'org-name-client-build-artifacts')"
